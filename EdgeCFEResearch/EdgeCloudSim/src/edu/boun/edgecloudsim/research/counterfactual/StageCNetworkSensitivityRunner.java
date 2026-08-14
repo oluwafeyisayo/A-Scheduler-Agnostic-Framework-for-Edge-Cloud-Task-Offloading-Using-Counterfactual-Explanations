@@ -1,0 +1,662 @@
+package edu.boun.edgecloudsim.research.counterfactual;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+/**
+ * Eclipse-native Stage C launcher.
+ *
+ * Run this class with Run As -> Java Application. It uses the exact classpath
+ * Eclipse used to launch this class, then starts each simulation in a fresh JVM.
+ * This avoids PowerShell execution-policy and classpath problems.
+ *
+ * Expected MainApp argument order:
+ *   args[0] = configuration file
+ *   args[1] = edge_devices.xml
+ *   args[2] = applications.xml
+ *   args[3] = output directory
+ *   args[4] = iteration number
+ */
+public final class StageCNetworkSensitivityRunner {
+
+    private static final int DEVICE_COUNT = 500;
+    private static final int START_ITERATION = 1;
+    private static final int END_ITERATION = 5;
+
+    private static final String SCENARIO = "TWO_TIER_WITH_EO";
+    private static final String SCHEDULERS =
+            "RANDOM,ROUND_ROBIN,LEAST_LOADED,MULTI_OBJECTIVE,PPO";
+
+    private static final String BASE_CONFIG_RELATIVE_PATH =
+            "scripts/counterfactual_offloading/config/default_config.properties";
+
+    private static final String EDGE_DEVICES_RELATIVE_PATH =
+            "scripts/counterfactual_offloading/config/edge_devices.xml";
+
+    private static final String APPLICATIONS_RELATIVE_PATH =
+            "scripts/counterfactual_offloading/config/applications.xml";
+
+    private static final DateTimeFormatter DATE_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    private StageCNetworkSensitivityRunner() {
+        // Utility class.
+    }
+
+    private enum NetworkCondition {
+        CONSTRAINED("constrained", "100", "8", "0.2"),
+        SEVERE("severe", "50", "4", "0.4");
+
+        private final String folderName;
+        private final String wlanBandwidth;
+        private final String wanBandwidth;
+        private final String propagationDelay;
+
+        NetworkCondition(
+                String folderName,
+                String wlanBandwidth,
+                String wanBandwidth,
+                String propagationDelay) {
+            this.folderName = folderName;
+            this.wlanBandwidth = wlanBandwidth;
+            this.wanBandwidth = wanBandwidth;
+            this.propagationDelay = propagationDelay;
+        }
+    }
+
+    private static final class RunRecord {
+        private final String condition;
+        private final int iteration;
+        private final String wlanBandwidth;
+        private final String wanBandwidth;
+        private final String propagationDelay;
+        private final Path outputDirectory;
+        private final Path configFile;
+        private final LocalDateTime startedAt;
+        private final LocalDateTime finishedAt;
+        private final double durationSeconds;
+        private final int exitCode;
+        private final int decisionFileCount;
+        private final int candidateFileCount;
+        private final String status;
+        private final String errorMessage;
+
+        RunRecord(
+                String condition,
+                int iteration,
+                String wlanBandwidth,
+                String wanBandwidth,
+                String propagationDelay,
+                Path outputDirectory,
+                Path configFile,
+                LocalDateTime startedAt,
+                LocalDateTime finishedAt,
+                double durationSeconds,
+                int exitCode,
+                int decisionFileCount,
+                int candidateFileCount,
+                String status,
+                String errorMessage) {
+            this.condition = condition;
+            this.iteration = iteration;
+            this.wlanBandwidth = wlanBandwidth;
+            this.wanBandwidth = wanBandwidth;
+            this.propagationDelay = propagationDelay;
+            this.outputDirectory = outputDirectory;
+            this.configFile = configFile;
+            this.startedAt = startedAt;
+            this.finishedAt = finishedAt;
+            this.durationSeconds = durationSeconds;
+            this.exitCode = exitCode;
+            this.decisionFileCount = decisionFileCount;
+            this.candidateFileCount = candidateFileCount;
+            this.status = status;
+            this.errorMessage = errorMessage;
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            Path projectRoot = resolveProjectRoot(args);
+            Path baseConfig = projectRoot.resolve(BASE_CONFIG_RELATIVE_PATH).normalize();
+            Path edgeDevicesFile =
+                    projectRoot.resolve(EDGE_DEVICES_RELATIVE_PATH).normalize();
+            Path applicationsFile =
+                    projectRoot.resolve(APPLICATIONS_RELATIVE_PATH).normalize();
+
+            requireRegularFile(baseConfig, "Base configuration");
+            requireRegularFile(edgeDevicesFile, "Edge-device XML");
+            requireRegularFile(applicationsFile, "Applications XML");
+
+            String eclipseClassPath = System.getProperty("java.class.path");
+            if (eclipseClassPath == null || eclipseClassPath.trim().isEmpty()) {
+                throw new IllegalStateException("Eclipse Java classpath is empty.");
+            }
+
+            String javaExecutable = resolveJavaExecutable();
+            String mainClassName = MainApp.class.getName();
+
+            System.out.println("Project root: " + projectRoot);
+            System.out.println("Base configuration: " + baseConfig);
+            System.out.println("Edge-device XML: " + edgeDevicesFile);
+            System.out.println("Applications XML: " + applicationsFile);
+            System.out.println("Simulation main class: " + mainClassName);
+            System.out.println("Eclipse classpath entries: "
+                    + eclipseClassPath.split(Pattern.quote(File.pathSeparator)).length);
+
+            Path stageCRoot = projectRoot.resolve("sim_results/stage_c");
+            Path generatedConfigRoot = projectRoot.resolve("scripts/stage_c");
+            Path manifest = stageCRoot.resolve("stage_c_run_manifest.csv");
+
+            Files.createDirectories(stageCRoot);
+            Files.createDirectories(generatedConfigRoot);
+
+            String baseConfigContent = new String(
+                    Files.readAllBytes(baseConfig), StandardCharsets.UTF_8);
+
+            List<RunRecord> records = new ArrayList<RunRecord>();
+            writeManifest(manifest, records);
+
+            for (NetworkCondition condition : NetworkCondition.values()) {
+                Path generatedConfig = generatedConfigRoot.resolve(
+                        "default_config_stage_c_" + condition.folderName + ".properties");
+
+                String conditionConfig = createConditionConfig(
+                        baseConfigContent, condition);
+                Files.write(
+                        generatedConfig,
+                        conditionConfig.getBytes(StandardCharsets.UTF_8),
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE);
+
+                System.out.println();
+                System.out.println("============================================================");
+                System.out.println("STAGE C CONDITION: " + condition.name());
+                System.out.println(
+                        "WLAN=" + condition.wlanBandwidth + " Mbps; "
+                        + "WAN=" + condition.wanBandwidth + " Mbps; "
+                        + "delay=" + condition.propagationDelay + " s");
+                System.out.println("Configuration: " + generatedConfig);
+                System.out.println("============================================================");
+
+                for (int iteration = START_ITERATION;
+                        iteration <= END_ITERATION;
+                        iteration++) {
+
+                    Path iterationOutput = stageCRoot
+                            .resolve(condition.folderName)
+                            .resolve("ite" + iteration);
+                    Files.createDirectories(iterationOutput);
+
+                    System.out.println();
+                    System.out.println(
+                            "Running " + condition.name()
+                            + ", iteration " + iteration + " ...");
+
+                    LocalDateTime startedAt = LocalDateTime.now();
+                    long startNanos = System.nanoTime();
+                    int exitCode = -1;
+                    String status;
+                    String errorMessage = "";
+
+                    try {
+                        /*
+                         * MainApp versions differ in how they interpret the output-folder
+                         * argument. Take a snapshot first, then collect every provenance
+                         * file created or modified by this run and place it in the Stage C
+                         * condition/iteration directory.
+                         */
+                        Map<Path, String> provenanceBefore =
+                                snapshotProvenanceFiles(projectRoot, iteration);
+
+                        /*
+                         * MainApp expects five application arguments:
+                         *   0: simulation properties
+                         *   1: edge_devices.xml
+                         *   2: applications.xml
+                         *   3: output folder
+                         *   4: iteration number
+                         */
+                        List<String> command = Arrays.asList(
+                                javaExecutable,
+                                "-cp",
+                                eclipseClassPath,
+                                mainClassName,
+                                generatedConfig.toString(),
+                                edgeDevicesFile.toString(),
+                                applicationsFile.toString(),
+                                iterationOutput.toString(),
+                                Integer.toString(iteration));
+
+                        ProcessBuilder processBuilder = new ProcessBuilder(command);
+                        processBuilder.directory(projectRoot.toFile());
+                        processBuilder.redirectErrorStream(true);
+                        processBuilder.inheritIO();
+
+                        Process process = processBuilder.start();
+                        exitCode = process.waitFor();
+
+                        if (exitCode != 0) {
+                            status = "FAILED";
+                            errorMessage = "MainApp exited with code " + exitCode + ".";
+                        } else {
+                            int collected = collectChangedProvenanceFiles(
+                                    projectRoot,
+                                    iterationOutput,
+                                    iteration,
+                                    provenanceBefore);
+
+                            System.out.println(
+                                    "Collected " + collected
+                                    + " newly generated provenance files for "
+                                    + condition.name() + ", iteration " + iteration + ".");
+
+                            status = "SUCCESS";
+                        }
+                    } catch (Exception exception) {
+                        status = "FAILED";
+                        errorMessage = exception.getClass().getSimpleName()
+                                + ": " + safe(exception.getMessage());
+                    }
+
+                    LocalDateTime finishedAt = LocalDateTime.now();
+                    double durationSeconds =
+                            (System.nanoTime() - startNanos) / 1_000_000_000.0;
+
+                    int decisionFileCount = countDecisionFiles(
+                            iterationOutput, iteration, false);
+                    int candidateFileCount = countDecisionFiles(
+                            iterationOutput, iteration, true);
+
+                    if ("SUCCESS".equals(status)
+                            && (decisionFileCount != 5 || candidateFileCount != 5)) {
+                        status = "INCOMPLETE";
+                        errorMessage = "Expected 5 decision files and 5 candidate files, "
+                                + "but found " + decisionFileCount + " and "
+                                + candidateFileCount + ".";
+                    }
+
+                    RunRecord record = new RunRecord(
+                            condition.name(),
+                            iteration,
+                            condition.wlanBandwidth,
+                            condition.wanBandwidth,
+                            condition.propagationDelay,
+                            iterationOutput,
+                            generatedConfig,
+                            startedAt,
+                            finishedAt,
+                            durationSeconds,
+                            exitCode,
+                            decisionFileCount,
+                            candidateFileCount,
+                            status,
+                            errorMessage);
+
+                    records.add(record);
+                    writeManifest(manifest, records);
+
+                    System.out.printf(
+                            Locale.US,
+                            "Completed %s, iteration %d: %d decision files, "
+                            + "%d candidate files, status=%s.%n",
+                            condition.name(),
+                            iteration,
+                            decisionFileCount,
+                            candidateFileCount,
+                            status);
+
+                    if (!"SUCCESS".equals(status)) {
+                        throw new IllegalStateException(
+                                "Stage C run failed validation for "
+                                + condition.name() + ", iteration " + iteration
+                                + ": " + errorMessage);
+                    }
+                }
+            }
+
+            System.out.println();
+            System.out.println("Stage C simulation generation completed.");
+            System.out.println("NORMAL is supplied by Stage A.");
+            System.out.println("CONSTRAINED and SEVERE results: " + stageCRoot);
+            System.out.println("Manifest: " + manifest);
+
+        } catch (Exception exception) {
+            System.err.println();
+            System.err.println("STAGE C RUNNER ERROR");
+            System.err.println(exception.getMessage());
+            exception.printStackTrace(System.err);
+            System.exit(1);
+        }
+    }
+
+    private static Path resolveProjectRoot(String[] args) {
+        if (args != null && args.length > 0
+                && args[0] != null && !args[0].trim().isEmpty()) {
+            Path supplied = Paths.get(args[0]).toAbsolutePath().normalize();
+            if (!Files.isDirectory(supplied)) {
+                throw new IllegalArgumentException(
+                        "The supplied project root is not a directory: " + supplied);
+            }
+            return supplied;
+        }
+
+        Path current = Paths.get("").toAbsolutePath().normalize();
+        Path candidate = current;
+
+        while (candidate != null) {
+            if (Files.isRegularFile(candidate.resolve(BASE_CONFIG_RELATIVE_PATH))) {
+                return candidate;
+            }
+            candidate = candidate.getParent();
+        }
+
+        throw new IllegalStateException(
+                "Could not locate the EdgeCloudSim project root from " + current
+                + ". Pass the project root as the first program argument.");
+    }
+
+    private static void requireRegularFile(
+            Path path,
+            String description) {
+
+        if (!Files.isRegularFile(path)) {
+            throw new IllegalStateException(
+                    description + " file was not found: " + path);
+        }
+    }
+
+    private static String resolveJavaExecutable() {
+        String executable = isWindows() ? "java.exe" : "java";
+        Path javaPath = Paths.get(
+                System.getProperty("java.home"), "bin", executable);
+
+        if (!Files.isRegularFile(javaPath)) {
+            throw new IllegalStateException(
+                    "Java executable was not found: " + javaPath);
+        }
+        return javaPath.toString();
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "")
+                .toLowerCase(Locale.ENGLISH)
+                .contains("win");
+    }
+
+    private static String createConditionConfig(
+            String baseContent,
+            NetworkCondition condition) {
+
+        String content = baseContent;
+        content = replaceRequiredProperty(
+                content, "min_number_of_mobile_devices", Integer.toString(DEVICE_COUNT));
+        content = replaceRequiredProperty(
+                content, "max_number_of_mobile_devices", Integer.toString(DEVICE_COUNT));
+        content = replaceRequiredProperty(
+                content, "mobile_device_counter_size", Integer.toString(DEVICE_COUNT));
+        content = replaceRequiredProperty(
+                content, "orchestrator_policies", SCHEDULERS);
+        content = replaceRequiredProperty(
+                content, "simulation_scenarios", SCENARIO);
+        content = replaceRequiredProperty(
+                content, "wlan_bandwidth", condition.wlanBandwidth);
+        content = replaceRequiredProperty(
+                content, "wan_bandwidth", condition.wanBandwidth);
+        content = replaceRequiredProperty(
+                content, "wan_propogation_delay", condition.propagationDelay);
+        return content;
+    }
+
+    private static String replaceRequiredProperty(
+            String content,
+            String key,
+            String value) {
+
+        Pattern pattern = Pattern.compile(
+                "(?m)^\\s*" + Pattern.quote(key) + "\\s*=.*$");
+        Matcher matcher = pattern.matcher(content);
+
+        if (!matcher.find()) {
+            throw new IllegalStateException(
+                    "Required property was not found in the base configuration: " + key);
+        }
+
+        return matcher.replaceFirst(
+                Matcher.quoteReplacement(key + "=" + value));
+    }
+
+
+    /**
+     * Captures the current state of all decision and candidate provenance files
+     * for the requested iteration. This lets the runner distinguish files
+     * produced by the current simulation from older Stage A/Stage B files.
+     */
+    private static Map<Path, String> snapshotProvenanceFiles(
+            Path projectRoot,
+            int iteration) throws IOException {
+
+        Map<Path, String> snapshot = new HashMap<Path, String>();
+        final String iterationToken =
+                "_" + DEVICE_COUNT + "DEVICES_ITE" + iteration;
+
+        try (Stream<Path> paths = Files.walk(projectRoot)) {
+            paths.filter(Files::isRegularFile)
+                    .filter(path -> isProvenanceFile(
+                            path.getFileName().toString(), iterationToken))
+                    .forEach(path -> {
+                        try {
+                            snapshot.put(
+                                    path.toAbsolutePath().normalize(),
+                                    fileSignature(path));
+                        } catch (IOException exception) {
+                            throw new RuntimeException(exception);
+                        }
+                    });
+        } catch (RuntimeException exception) {
+            if (exception.getCause() instanceof IOException) {
+                throw (IOException) exception.getCause();
+            }
+            throw exception;
+        }
+
+        return snapshot;
+    }
+
+    /**
+     * Finds files created or modified after MainApp ran and copies them into
+     * sim_results/stage_c/<condition>/ite<k>/decision_logs.
+     */
+    private static int collectChangedProvenanceFiles(
+            Path projectRoot,
+            Path iterationOutput,
+            int iteration,
+            Map<Path, String> before) throws IOException {
+
+        Path destinationDirectory = iterationOutput.resolve("decision_logs");
+        Files.createDirectories(destinationDirectory);
+
+        final String iterationToken =
+                "_" + DEVICE_COUNT + "DEVICES_ITE" + iteration;
+
+        List<Path> changedFiles = new ArrayList<Path>();
+
+        try (Stream<Path> paths = Files.walk(projectRoot)) {
+            paths.filter(Files::isRegularFile)
+                    .filter(path -> isProvenanceFile(
+                            path.getFileName().toString(), iterationToken))
+                    .forEach(path -> {
+                        try {
+                            Path normalized = path.toAbsolutePath().normalize();
+                            String previousSignature = before.get(normalized);
+                            String currentSignature = fileSignature(path);
+
+                            if (previousSignature == null
+                                    || !previousSignature.equals(currentSignature)) {
+                                changedFiles.add(path);
+                            }
+                        } catch (IOException exception) {
+                            throw new RuntimeException(exception);
+                        }
+                    });
+        } catch (RuntimeException exception) {
+            if (exception.getCause() instanceof IOException) {
+                throw (IOException) exception.getCause();
+            }
+            throw exception;
+        }
+
+        int copied = 0;
+        for (Path source : changedFiles) {
+            Path destination =
+                    destinationDirectory.resolve(source.getFileName().toString());
+
+            Path normalizedSource = source.toAbsolutePath().normalize();
+            Path normalizedDestination =
+                    destination.toAbsolutePath().normalize();
+
+            if (!normalizedSource.equals(normalizedDestination)) {
+                Files.copy(
+                        source,
+                        destination,
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.COPY_ATTRIBUTES);
+            }
+            copied++;
+        }
+
+        return copied;
+    }
+
+    private static boolean isProvenanceFile(
+            String fileName,
+            String iterationToken) {
+
+        return fileName.startsWith("offloading_decisions_")
+                && fileName.endsWith(".csv")
+                && fileName.contains(iterationToken);
+    }
+
+    private static String fileSignature(Path path) throws IOException {
+        return Files.getLastModifiedTime(path).toMillis()
+                + ":" + Files.size(path);
+    }
+
+    private static int countDecisionFiles(
+            Path outputRoot,
+            int iteration,
+            boolean candidateFiles) throws IOException {
+
+        if (!Files.isDirectory(outputRoot)) {
+            return 0;
+        }
+
+        final String iterationToken =
+                "_" + DEVICE_COUNT + "DEVICES_ITE" + iteration;
+
+        try (Stream<Path> paths = Files.walk(outputRoot)) {
+            return (int) paths
+                    .filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .filter(name -> name.startsWith("offloading_decisions_"))
+                    .filter(name -> name.endsWith(".csv"))
+                    .filter(name -> name.contains(iterationToken))
+                    .filter(name -> candidateFiles
+                            ? name.endsWith("_candidates.csv")
+                            : !name.endsWith("_candidates.csv"))
+                    .count();
+        }
+    }
+
+    private static void writeManifest(
+            Path manifest,
+            List<RunRecord> records) throws IOException {
+
+        Files.createDirectories(manifest.getParent());
+
+        try (BufferedWriter writer = Files.newBufferedWriter(
+                manifest,
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE)) {
+
+            writer.write(
+                    "stage,condition,iteration,device_count,"
+                    + "wlan_bandwidth_mbps,wan_bandwidth_mbps,"
+                    + "wan_propagation_delay_s,scheduler_count,"
+                    + "decision_file_count,candidate_file_count,exit_code,"
+                    + "output_directory,config_file,started_at,finished_at,"
+                    + "duration_seconds,status,error_message");
+            writer.newLine();
+
+            for (RunRecord record : records) {
+                writer.write(csv("STAGE_C"));
+                writer.write(',');
+                writer.write(csv(record.condition));
+                writer.write(',');
+                writer.write(Integer.toString(record.iteration));
+                writer.write(',');
+                writer.write(Integer.toString(DEVICE_COUNT));
+                writer.write(',');
+                writer.write(record.wlanBandwidth);
+                writer.write(',');
+                writer.write(record.wanBandwidth);
+                writer.write(',');
+                writer.write(record.propagationDelay);
+                writer.write(',');
+                writer.write("5");
+                writer.write(',');
+                writer.write(Integer.toString(record.decisionFileCount));
+                writer.write(',');
+                writer.write(Integer.toString(record.candidateFileCount));
+                writer.write(',');
+                writer.write(Integer.toString(record.exitCode));
+                writer.write(',');
+                writer.write(csv(record.outputDirectory.toString()));
+                writer.write(',');
+                writer.write(csv(record.configFile.toString()));
+                writer.write(',');
+                writer.write(csv(record.startedAt.format(DATE_TIME_FORMAT)));
+                writer.write(',');
+                writer.write(csv(record.finishedAt.format(DATE_TIME_FORMAT)));
+                writer.write(',');
+                writer.write(String.format(
+                        Locale.US, "%.3f", record.durationSeconds));
+                writer.write(',');
+                writer.write(csv(record.status));
+                writer.write(',');
+                writer.write(csv(record.errorMessage));
+                writer.newLine();
+            }
+        }
+    }
+
+    private static String csv(String value) {
+        String safeValue = value == null ? "" : value;
+        return '"' + safeValue.replace("\"", "\"\"") + '"';
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
+    }
+}

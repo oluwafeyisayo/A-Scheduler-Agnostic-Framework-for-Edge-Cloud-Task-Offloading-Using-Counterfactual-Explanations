@@ -1,0 +1,390 @@
+package edu.boun.edgecloudsim.research.counterfactual.comparison;
+
+import edu.boun.edgecloudsim.research.counterfactual.DecisionState;
+import edu.boun.edgecloudsim.research.counterfactual.ReplayState;
+import edu.boun.edgecloudsim.research.counterfactual.replay.SchedulerDecision;
+
+/**
+ * Compares the original scheduler decision with a replayed scheduler
+ * decision.
+ *
+ * The comparator is scheduler-agnostic. It uses only observable decision
+ * values:
+ *
+ * - decision outcome
+ * - selected destination
+ * - selected VM
+ * - original and replayed schedulability
+ */
+public final class DecisionComparator {
+
+    /**
+     * Compares a logged DecisionState with a replayed scheduler decision.
+     */
+    public DecisionComparisonResult compare(
+            DecisionState originalDecision,
+            SchedulerDecision replayedDecision) {
+
+        if(originalDecision == null) {
+
+            throw new IllegalArgumentException(
+                    "Original DecisionState cannot be null.");
+        }
+
+        if(replayedDecision == null) {
+
+            throw new IllegalArgumentException(
+                    "Replayed SchedulerDecision cannot be null.");
+        }
+
+        if(originalDecision.getTaskId()
+                != replayedDecision.getTaskId()) {
+
+            throw new IllegalArgumentException(
+                    "Original and replayed decisions must "
+                    + "refer to the same task.");
+        }
+
+        if(!replayedDecision.wasSuccessfullyReplayed()) {
+
+            return DecisionComparisonResult.notComparable(
+                    originalDecision.getTaskId(),
+                    "The scheduler decision could not be "
+                    + "replayed deterministically. Status: "
+                    + replayedDecision.getReplayStatus());
+        }
+
+        return compareValues(
+                originalDecision.getTaskId(),
+
+                originalDecision.getDecisionOutcome(),
+                originalDecision.getSelectedDestination(),
+                originalDecision.getSelectedVmId(),
+
+                replayedDecision.getDecisionOutcome(),
+                replayedDecision.getSelectedDestination(),
+                replayedDecision.getSelectedVmId());
+    }
+
+    /**
+     * Compares the original decision values retained in ReplayState with
+     * a replayed scheduler decision.
+     *
+     * This overload is required by CounterfactualVerifier.
+     */
+    public DecisionComparisonResult compare(
+            ReplayState originalReplayState,
+            SchedulerDecision replayedDecision) {
+
+        if(originalReplayState == null) {
+
+            throw new IllegalArgumentException(
+                    "Original ReplayState cannot be null.");
+        }
+
+        if(replayedDecision == null) {
+
+            throw new IllegalArgumentException(
+                    "Replayed SchedulerDecision cannot be null.");
+        }
+
+        if(originalReplayState.getTaskId()
+                != replayedDecision.getTaskId()) {
+
+            throw new IllegalArgumentException(
+                    "Original replay state and replayed decision "
+                    + "must refer to the same task.");
+        }
+
+        if(!replayedDecision.wasSuccessfullyReplayed()) {
+
+            return DecisionComparisonResult.notComparable(
+                    originalReplayState.getTaskId(),
+                    "The scheduler decision could not be "
+                    + "replayed deterministically. Status: "
+                    + replayedDecision.getReplayStatus());
+        }
+
+        return compareValues(
+                originalReplayState.getTaskId(),
+
+                originalReplayState.getDecisionOutcome(),
+                originalReplayState.getSelectedDestination(),
+                originalReplayState.getSelectedVmId(),
+
+                replayedDecision.getDecisionOutcome(),
+                replayedDecision.getSelectedDestination(),
+                replayedDecision.getSelectedVmId());
+    }
+
+    /**
+     * Performs the shared comparison.
+     */
+    private DecisionComparisonResult compareValues(
+            long taskId,
+            String originalOutcome,
+            String originalDestination,
+            int originalVmId,
+            String replayedOutcome,
+            String replayedDestination,
+            int replayedVmId) {
+
+        boolean outcomeChanged =
+                !sameText(
+                        originalOutcome,
+                        replayedOutcome);
+
+        boolean destinationChanged =
+                !sameDestination(
+                        originalDestination,
+                        replayedDestination);
+
+        boolean vmChanged =
+                originalVmId
+                != replayedVmId;
+
+        boolean originalSelectionSuccessful =
+                isSuccessfulSelection(
+                        originalOutcome,
+                        originalDestination,
+                        originalVmId);
+
+        boolean replayedSelectionSuccessful =
+                isSuccessfulSelection(
+                        replayedOutcome,
+                        replayedDestination,
+                        replayedVmId);
+
+        /*
+         * Feasibility restoration specifically means that an originally
+         * unschedulable task becomes schedulable after the feature
+         * modifications.
+         */
+        boolean feasibilityRestored =
+                !originalSelectionSuccessful
+                && replayedSelectionSuccessful;
+
+        /*
+         * An execution target changes when the selected VM changes.
+         *
+         * A destination change is also treated as an execution-target
+         * change, even in the unlikely case that VM identifiers overlap
+         * between destinations.
+         */
+        boolean executionTargetChanged =
+                vmChanged
+                || destinationChanged;
+
+        /*
+         * An offloading decision flip is narrower than a generic target
+         * change. It means that the destination or scheduling outcome
+         * changed.
+         */
+        boolean offloadingDecisionFlipped =
+                destinationChanged
+                || outcomeChanged
+                || feasibilityRestored;
+
+        DecisionChangeType primaryChangeType =
+                determinePrimaryChangeType(
+                        feasibilityRestored,
+                        destinationChanged,
+                        executionTargetChanged);
+
+        String reason =
+                buildReason(
+                        feasibilityRestored,
+                        destinationChanged,
+                        executionTargetChanged,
+                        outcomeChanged);
+
+        return new DecisionComparisonResult(
+                taskId,
+                true,
+                outcomeChanged,
+                destinationChanged,
+                vmChanged,
+                executionTargetChanged,
+                offloadingDecisionFlipped,
+                feasibilityRestored,
+                primaryChangeType,
+                reason);
+    }
+
+    /**
+     * Chooses the most semantically specific observed change.
+     */
+    private static DecisionChangeType determinePrimaryChangeType(
+            boolean feasibilityRestored,
+            boolean destinationChanged,
+            boolean executionTargetChanged) {
+
+        if(feasibilityRestored) {
+
+            return DecisionChangeType
+                    .FEASIBILITY_RESTORATION;
+        }
+
+        if(destinationChanged) {
+
+            return DecisionChangeType
+                    .DESTINATION_CHANGE;
+        }
+
+        if(executionTargetChanged) {
+
+            return DecisionChangeType
+                    .EXECUTION_TARGET_CHANGE;
+        }
+
+        return null;
+    }
+
+    private static String buildReason(
+            boolean feasibilityRestored,
+            boolean destinationChanged,
+            boolean executionTargetChanged,
+            boolean outcomeChanged) {
+
+        if(feasibilityRestored) {
+
+            return "The originally unschedulable task became "
+                    + "schedulable after counterfactual replay.";
+        }
+
+        if(destinationChanged) {
+
+            return "The scheduler selected a different "
+                    + "offloading destination.";
+        }
+
+        if(executionTargetChanged) {
+
+            return "The scheduler retained the destination but "
+                    + "selected a different execution target.";
+        }
+
+        if(outcomeChanged) {
+
+            return "The scheduler decision outcome changed.";
+        }
+
+        return "The replayed scheduler decision did not produce "
+                + "a supported counterfactual change.";
+    }
+
+    /**
+     * Determines whether the observable scheduler decision represents a
+     * successful resource selection.
+     */
+    private static boolean isSuccessfulSelection(
+            String decisionOutcome,
+            String selectedDestination,
+            int selectedVmId) {
+
+        if(isFailureOutcome(
+                decisionOutcome)) {
+
+            return false;
+        }
+
+        if(isNoDestination(
+                selectedDestination)) {
+
+            return false;
+        }
+
+        return selectedVmId >= 0;
+    }
+
+    private static boolean isFailureOutcome(
+            String decisionOutcome) {
+
+        if(decisionOutcome == null) {
+
+            return true;
+        }
+
+        String normalizedOutcome =
+                normalizeText(
+                        decisionOutcome);
+
+        return normalizedOutcome.length() == 0
+                || "NO_FEASIBLE_VM".equals(
+                        normalizedOutcome)
+                || "FAILED".equals(
+                        normalizedOutcome)
+                || "REJECTED".equals(
+                        normalizedOutcome)
+                || "UNSCHEDULABLE".equals(
+                        normalizedOutcome)
+                || "NONE".equals(
+                        normalizedOutcome);
+    }
+
+    private static boolean isNoDestination(
+            String destination) {
+
+        if(destination == null) {
+
+            return true;
+        }
+
+        String normalizedDestination =
+                normalizeText(
+                        destination);
+
+        return normalizedDestination.length() == 0
+                || "NONE".equals(
+                        normalizedDestination)
+                || "NO_DESTINATION".equals(
+                        normalizedDestination)
+                || "UNSELECTED".equals(
+                        normalizedDestination);
+    }
+
+    private static boolean sameDestination(
+            String first,
+            String second) {
+
+        if(isNoDestination(first)
+                && isNoDestination(second)) {
+
+            return true;
+        }
+
+        return sameText(
+                first,
+                second);
+    }
+
+    private static boolean sameText(
+            String first,
+            String second) {
+
+        if(first == null
+                || second == null) {
+
+            return first == second;
+        }
+
+        return normalizeText(first)
+                .equals(
+                        normalizeText(second));
+    }
+
+    private static String normalizeText(
+            String value) {
+
+        if(value == null) {
+
+            return "";
+        }
+
+        return value
+                .trim()
+                .toUpperCase()
+                .replace(' ', '_')
+                .replace('-', '_');
+    }
+}

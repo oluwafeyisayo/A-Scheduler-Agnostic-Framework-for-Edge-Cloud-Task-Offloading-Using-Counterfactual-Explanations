@@ -1,0 +1,496 @@
+package edu.boun.edgecloudsim.research.counterfactual.experiment;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Runs Stage D search-efficiency experiments in separate JVMs.
+ *
+ * Reuses the existing Normal-condition 500-device provenance and compares:
+ *  - ADAPTIVE_BEST_FIRST
+ *  - FIXED_EXHAUSTIVE
+ *
+ * Neighborhood refinement remains enabled by the default search configuration.
+ */
+public final class StageDExperimentRunner {
+
+    private static final int DEFAULT_START_ITERATION = 1;
+    private static final int DEFAULT_END_ITERATION = 5;
+
+    private static final String REPLAY_TEST_CLASS =
+            "edu.boun.edgecloudsim.research.counterfactual.test."
+            + "SchedulerReplayEngineTest";
+
+    private static final String[] SCHEDULERS = {
+            "RANDOM",
+            "ROUND_ROBIN",
+            "LEAST_LOADED",
+            "MULTI_OBJECTIVE",
+            "PPO"
+    };
+
+    private static final String SCENARIO = "TWO_TIER_WITH_EO";
+    private static final int DEVICE_COUNT = 500;
+
+    private enum SearchVariant {
+
+        ADAPTIVE(
+                "adaptive",
+                "ADAPTIVE_BEST_FIRST",
+                "ADAPTIVE_PLUS_NEIGHBORHOOD"),
+
+        EXHAUSTIVE(
+                "exhaustive",
+                "FIXED_EXHAUSTIVE",
+                "EXHAUSTIVE_PLUS_NEIGHBORHOOD");
+
+        private final String folderName;
+        private final String searchMode;
+        private final String searchVariantLabel;
+
+        SearchVariant(
+                String folderName,
+                String searchMode,
+                String searchVariantLabel) {
+
+            this.folderName = folderName;
+            this.searchMode = searchMode;
+            this.searchVariantLabel = searchVariantLabel;
+        }
+    }
+
+    private StageDExperimentRunner() {
+    }
+
+    public static void main(String[] args) {
+
+        int startIteration = parseArgument(
+                args,
+                0,
+                DEFAULT_START_ITERATION);
+
+        int endIteration = parseArgument(
+                args,
+                1,
+                DEFAULT_END_ITERATION);
+
+        if(startIteration < 1 || endIteration < startIteration) {
+            throw new IllegalArgumentException(
+                    "Expected a positive iteration range where start <= end.");
+        }
+
+        try {
+            File stageDRoot =
+                    new File("sim_results/stage_d");
+
+            File executionLogDirectory =
+                    new File(stageDRoot, "execution_logs");
+
+            ensureDirectory(stageDRoot);
+            ensureDirectory(executionLogDirectory);
+
+            for(SearchVariant variant : SearchVariant.values()) {
+
+                for(int iteration = startIteration;
+                        iteration <= endIteration;
+                        iteration++) {
+
+                    runVariantIteration(
+                            variant,
+                            iteration,
+                            executionLogDirectory);
+                }
+            }
+
+            System.out.println();
+            System.out.println("========================================");
+            System.out.println("Stage D completed successfully.");
+            System.out.println(
+                    "Iterations: "
+                    + startIteration
+                    + "-"
+                    + endIteration);
+            System.out.println(
+                    "Results: "
+                    + stageDRoot.getAbsolutePath());
+            System.out.println("========================================");
+        }
+        catch(Exception exception) {
+
+            System.err.println(
+                    "Stage D experiment failed: "
+                    + exception.getMessage());
+
+            exception.printStackTrace(System.err);
+            throw new RuntimeException(exception);
+        }
+    }
+
+    private static void runVariantIteration(
+            SearchVariant variant,
+            int iteration,
+            File executionLogDirectory)
+            throws IOException, InterruptedException {
+
+        System.out.println();
+        System.out.println("========================================");
+        System.out.println(
+                "Starting Stage D "
+                + variant.name()
+                + ", iteration "
+                + iteration);
+        System.out.println("========================================");
+
+        File inputFolder =
+                resolveNormalInputFolder(iteration);
+
+        File decisionDirectory =
+                new File(inputFolder, "decision_logs");
+
+        verifyProvenance(
+                decisionDirectory,
+                iteration);
+
+        File outputFolder =
+                new File(
+                        "sim_results/stage_d/"
+                        + variant.folderName
+                        + "/ite"
+                        + iteration
+                        + "/counterfactual_results");
+
+        ensureDirectory(outputFolder);
+
+        List<String> replayArguments =
+                new ArrayList<String>();
+
+        replayArguments.add(
+                String.valueOf(iteration));
+
+        replayArguments.add(
+                inputFolder.getPath());
+
+        replayArguments.add(
+                outputFolder.getPath());
+
+        replayArguments.add("NORMAL");
+
+        replayArguments.add(
+                variant.searchMode);
+
+        replayArguments.add(
+                variant.searchVariantLabel);
+
+        File logFile =
+                new File(
+                        executionLogDirectory,
+                        variant.folderName
+                        + "_ite"
+                        + iteration
+                        + ".log");
+
+        executeJavaClass(
+                REPLAY_TEST_CLASS,
+                replayArguments,
+                logFile);
+
+        verifyReports(
+                outputFolder,
+                variant,
+                iteration);
+
+        System.out.println(
+                "Completed Stage D "
+                + variant.name()
+                + ", iteration "
+                + iteration
+                + ".");
+    }
+
+    private static File resolveNormalInputFolder(
+            int iteration) {
+
+        File[] candidates = {
+                new File(
+                        "sim_results/stage_c/normal/ite"
+                        + iteration),
+
+                new File(
+                        "sim_results/stage_c/ite"
+                        + iteration),
+
+                new File(
+                        "sim_results/stage_c/provenance/normal/ite"
+                        + iteration),
+
+                new File(
+                        "sim_results/stage_c/evaluation/normal/ite"
+                        + iteration),
+
+                new File(
+                        "sim_results/ite"
+                        + iteration)
+        };
+
+        for(File candidate : candidates) {
+
+            File decisionDirectory =
+                    new File(
+                            candidate,
+                            "decision_logs");
+
+            if(decisionDirectory.exists()
+                    && decisionDirectory.isDirectory()) {
+
+                System.out.println(
+                        "Using NORMAL provenance: "
+                        + candidate.getAbsolutePath());
+
+                return candidate;
+            }
+        }
+
+        StringBuilder message =
+                new StringBuilder();
+
+        message.append(
+                "Unable to locate NORMAL provenance for iteration ")
+                .append(iteration)
+                .append(". Checked:");
+
+        for(File candidate : candidates) {
+
+            message.append(
+                    System.lineSeparator())
+                    .append(" - ")
+                    .append(
+                            new File(
+                                    candidate,
+                                    "decision_logs")
+                            .getAbsolutePath());
+        }
+
+        throw new IllegalStateException(
+                message.toString());
+    }
+
+    private static void verifyProvenance(
+            File decisionDirectory,
+            int iteration) {
+
+        if(!decisionDirectory.exists()
+                || !decisionDirectory.isDirectory()) {
+
+            throw new IllegalStateException(
+                    "Decision-log directory does not exist: "
+                    + decisionDirectory.getAbsolutePath());
+        }
+
+        for(String scheduler : SCHEDULERS) {
+
+            String prefix =
+                    "offloading_decisions_"
+                    + SCENARIO
+                    + "_"
+                    + scheduler
+                    + "_"
+                    + DEVICE_COUNT
+                    + "DEVICES_ITE"
+                    + iteration;
+
+            requireNonEmptyFile(
+                    new File(
+                            decisionDirectory,
+                            prefix + ".csv"));
+
+            requireNonEmptyFile(
+                    new File(
+                            decisionDirectory,
+                            prefix + "_candidates.csv"));
+        }
+    }
+
+    private static void verifyReports(
+            File outputFolder,
+            SearchVariant variant,
+            int iteration) {
+
+        File reportDirectory =
+                new File(outputFolder, "reports");
+
+        requireNonEmptyFile(
+                new File(
+                        reportDirectory,
+                        "experiment_configuration.csv"));
+
+        requireNonEmptyFile(
+                new File(
+                        reportDirectory,
+                        "eligibility_summary.csv"));
+
+        requireNonEmptyFile(
+                new File(
+                        reportDirectory,
+                        "objective_summary.csv"));
+
+        requireNonEmptyFile(
+                new File(
+                        reportDirectory,
+                        "objective_separation_summary.csv"));
+
+        System.out.println(
+                "Verified reports for "
+                + variant.name()
+                + ", iteration "
+                + iteration
+                + ": "
+                + reportDirectory.getAbsolutePath());
+    }
+
+    private static void executeJavaClass(
+            String className,
+            List<String> arguments,
+            File logFile)
+            throws IOException, InterruptedException {
+
+        ensureDirectory(logFile.getParentFile());
+
+        List<String> command =
+                new ArrayList<String>();
+
+        command.add(resolveJavaExecutable());
+        command.add("-cp");
+        command.add(System.getProperty("java.class.path"));
+        command.add(className);
+        command.addAll(arguments);
+
+        ProcessBuilder builder =
+                new ProcessBuilder(command);
+
+        builder.directory(
+                new File(System.getProperty("user.dir")));
+
+        builder.redirectErrorStream(true);
+
+        Process process =
+                builder.start();
+
+        try(BufferedReader reader =
+                    new BufferedReader(
+                            new InputStreamReader(
+                                    process.getInputStream()));
+                BufferedWriter writer =
+                    new BufferedWriter(
+                            new FileWriter(
+                                    logFile,
+                                    false))) {
+
+            String line;
+
+            while((line = reader.readLine()) != null) {
+
+                System.out.println(line);
+                writer.write(line);
+                writer.newLine();
+            }
+        }
+
+        int exitCode =
+                process.waitFor();
+
+        if(exitCode != 0) {
+
+            throw new IllegalStateException(
+                    "Child JVM failed for "
+                    + className
+                    + " with exit code "
+                    + exitCode
+                    + ". See "
+                    + logFile.getAbsolutePath());
+        }
+    }
+
+    private static void requireNonEmptyFile(
+            File file) {
+
+        if(!file.exists()
+                || !file.isFile()
+                || file.length() == 0L) {
+
+            throw new IllegalStateException(
+                    "Required file does not exist or is empty: "
+                    + file.getAbsolutePath());
+        }
+    }
+
+    private static void ensureDirectory(
+            File directory)
+            throws IOException {
+
+        if(directory.exists()) {
+
+            if(!directory.isDirectory()) {
+
+                throw new IOException(
+                        "Path is not a directory: "
+                        + directory.getAbsolutePath());
+            }
+
+            return;
+        }
+
+        if(!directory.mkdirs()) {
+
+            throw new IOException(
+                    "Unable to create directory: "
+                    + directory.getAbsolutePath());
+        }
+    }
+
+    private static String resolveJavaExecutable() {
+
+        String executableName =
+                System.getProperty("os.name")
+                .toLowerCase()
+                .contains("win")
+                ? "java.exe"
+                : "java";
+
+        return new File(
+                new File(
+                        System.getProperty("java.home"),
+                        "bin"),
+                executableName)
+                .getAbsolutePath();
+    }
+
+    private static int parseArgument(
+            String[] args,
+            int index,
+            int defaultValue) {
+
+        if(args == null
+                || args.length <= index) {
+
+            return defaultValue;
+        }
+
+        try {
+
+            return Integer.parseInt(
+                    args[index]);
+        }
+        catch(NumberFormatException exception) {
+
+            throw new IllegalArgumentException(
+                    "Iteration arguments must be integers.",
+                    exception);
+        }
+    }
+}

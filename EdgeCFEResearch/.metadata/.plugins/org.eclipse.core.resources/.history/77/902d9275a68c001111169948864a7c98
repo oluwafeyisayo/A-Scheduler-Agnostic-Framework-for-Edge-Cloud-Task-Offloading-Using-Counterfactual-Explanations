@@ -1,0 +1,291 @@
+package edu.boun.edgecloudsim.research.counterfactual.comparison;
+
+import edu.boun.edgecloudsim.research.counterfactual.ReplayState;
+import edu.boun.edgecloudsim.research.counterfactual.replay.SchedulerDecision;
+
+/**
+ * Scheduler-independent comparison between the original scheduling
+ * result and the result obtained after replaying a counterfactual.
+ */
+public final class DecisionComparator {
+
+    public DecisionComparisonResult compare(
+            ReplayState replayState,
+            SchedulerDecision replayedDecision) {
+
+        if(replayState == null) {
+
+            throw new IllegalArgumentException(
+                    "ReplayState cannot be null.");
+        }
+
+        if(replayedDecision == null) {
+
+            throw new IllegalArgumentException(
+                    "SchedulerDecision cannot be null.");
+        }
+
+        if(replayState.getTaskId()
+                != replayedDecision.getTaskId()) {
+
+            throw new IllegalArgumentException(
+                    "ReplayState and SchedulerDecision must "
+                    + "refer to the same task.");
+        }
+
+        if(!replayedDecision.wasSuccessfullyReplayed()) {
+
+            return new DecisionComparisonResult(
+                    replayState.getTaskId(),
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    null,
+                    "The scheduler decision could not be "
+                    + "replayed deterministically. Status: "
+                    + replayedDecision.getReplayStatus());
+        }
+
+        String originalOutcome =
+                replayState.getOriginalOutcome();
+
+        String replayedOutcome =
+                replayedDecision.getDecisionOutcome();
+
+        String originalDestination =
+                replayState.getOriginalDestination();
+
+        String replayedDestination =
+                replayedDecision.getSelectedDestination();
+
+        int originalVmId =
+                replayState.getOriginalSelectedVmId();
+
+        int replayedVmId =
+                replayedDecision.getSelectedVmId();
+
+        boolean outcomeChanged =
+                !sameText(
+                        originalOutcome,
+                        replayedOutcome);
+
+        boolean destinationChanged =
+                !sameText(
+                        originalDestination,
+                        replayedDestination);
+
+        boolean vmChanged =
+                originalVmId
+                != replayedVmId;
+
+        /*
+         * Host and datacenter comparison can be activated when the
+         * original identifiers are exposed by ReplayState.
+         */
+        boolean hostChanged =
+                false;
+
+        boolean datacenterChanged =
+                false;
+
+        boolean executionTargetChanged =
+                vmChanged
+                || hostChanged
+                || datacenterChanged;
+
+        boolean originalDecisionSelected =
+                isSelectedDecision(
+                        originalOutcome,
+                        originalVmId);
+
+        boolean replayedDecisionSelected =
+                isSelectedDecision(
+                        replayedOutcome,
+                        replayedVmId);
+
+        boolean feasibilityRestored =
+                !originalDecisionSelected
+                && replayedDecisionSelected;
+
+        boolean offloadingDecisionFlipped =
+                destinationChanged
+                || outcomeChanged
+                || feasibilityRestored;
+
+        DecisionChangeType primaryChangeType =
+                determinePrimaryChangeType(
+                        feasibilityRestored,
+                        destinationChanged,
+                        executionTargetChanged);
+
+        String reason =
+                buildReason(
+                        primaryChangeType,
+                        outcomeChanged,
+                        destinationChanged,
+                        executionTargetChanged,
+                        feasibilityRestored);
+
+        return new DecisionComparisonResult(
+                replayState.getTaskId(),
+                true,
+                outcomeChanged,
+                destinationChanged,
+                vmChanged,
+                hostChanged,
+                datacenterChanged,
+                executionTargetChanged,
+                offloadingDecisionFlipped,
+                feasibilityRestored,
+                primaryChangeType,
+                reason);
+    }
+
+    /**
+     * Selects the most significant supported counterfactual outcome.
+     *
+     * Priority:
+     *
+     * feasibility restoration
+     * destination change
+     * execution-target change
+     */
+    private static DecisionChangeType determinePrimaryChangeType(
+            boolean feasibilityRestored,
+            boolean destinationChanged,
+            boolean executionTargetChanged) {
+
+        if(feasibilityRestored) {
+
+            return DecisionChangeType
+                    .FEASIBILITY_RESTORATION;
+        }
+
+        if(destinationChanged) {
+
+            return DecisionChangeType
+                    .DESTINATION_CHANGE;
+        }
+
+        if(executionTargetChanged) {
+
+            return DecisionChangeType
+                    .EXECUTION_TARGET_CHANGE;
+        }
+
+        return null;
+    }
+
+    private static String buildReason(
+            DecisionChangeType primaryChangeType,
+            boolean outcomeChanged,
+            boolean destinationChanged,
+            boolean executionTargetChanged,
+            boolean feasibilityRestored) {
+
+        if(feasibilityRestored) {
+
+            return "The counterfactual restored scheduling "
+                    + "feasibility for an originally "
+                    + "unschedulable task.";
+        }
+
+        if(destinationChanged) {
+
+            return "The counterfactual changed the selected "
+                    + "offloading destination.";
+        }
+
+        if(executionTargetChanged) {
+
+            return "The scheduler retained the destination but "
+                    + "selected a different execution target.";
+        }
+
+        if(outcomeChanged) {
+
+            return "The scheduler outcome changed, but the change "
+                    + "does not correspond to a supported requested "
+                    + "counterfactual outcome.";
+        }
+
+        if(primaryChangeType == null) {
+
+            return "The replayed scheduler decision matches the "
+                    + "original decision.";
+        }
+
+        return "The observed scheduler decision change was "
+                + primaryChangeType
+                + ".";
+    }
+
+    private static boolean isSelectedDecision(
+            String outcome,
+            int selectedVmId) {
+
+        if(selectedVmId < 0) {
+
+            return false;
+        }
+
+        if(outcome == null
+                || outcome.trim().isEmpty()) {
+
+            return true;
+        }
+
+        String normalizedOutcome =
+                normalizeText(
+                        outcome);
+
+        if(normalizedOutcome.equals("NO_FEASIBLE_VM")
+                || normalizedOutcome.equals(
+                        "NO_FEASIBLE_CANDIDATE")
+                || normalizedOutcome.equals("NO_SELECTION")
+                || normalizedOutcome.equals("NOT_SELECTED")
+                || normalizedOutcome.equals("REJECTED")
+                || normalizedOutcome.equals("FAILED")
+                || normalizedOutcome.equals("INFEASIBLE")) {
+
+            return false;
+        }
+
+        return normalizedOutcome.equals("SELECTED")
+                || normalizedOutcome.equals("SUCCESS")
+                || normalizedOutcome.equals("SUCCESSFUL")
+                || normalizedOutcome.equals("SCHEDULED")
+                || normalizedOutcome.equals("ACCEPTED");
+    }
+
+    private static boolean sameText(
+            String first,
+            String second) {
+
+        if(first == null
+                || second == null) {
+
+            return first == second;
+        }
+
+        return normalizeText(first)
+                .equals(
+                        normalizeText(second));
+    }
+
+    private static String normalizeText(
+            String value) {
+
+        return value
+                .trim()
+                .toUpperCase()
+                .replace('-', '_')
+                .replace(' ', '_');
+    }
+}

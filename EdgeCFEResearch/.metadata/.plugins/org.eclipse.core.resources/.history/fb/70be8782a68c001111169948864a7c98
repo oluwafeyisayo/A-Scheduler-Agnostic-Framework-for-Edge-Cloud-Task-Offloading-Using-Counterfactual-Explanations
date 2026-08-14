@@ -1,0 +1,243 @@
+package edu.boun.edgecloudsim.research.counterfactual.comparison;
+
+/**
+ * Immutable comparison between an original scheduler decision and a
+ * replayed scheduler decision.
+ *
+ * The result distinguishes:
+ *
+ * 1. Execution-target change
+ * 2. Destination change
+ * 3. Feasibility restoration
+ */
+public final class DecisionComparisonResult {
+
+    private final long taskId;
+
+    private final boolean comparable;
+
+    private final boolean outcomeChanged;
+    private final boolean destinationChanged;
+    private final boolean vmChanged;
+
+    private final boolean executionTargetChanged;
+    private final boolean offloadingDecisionFlipped;
+    private final boolean feasibilityRestored;
+
+    private final DecisionChangeType primaryChangeType;
+
+    private final String reason;
+
+    public DecisionComparisonResult(
+            long taskId,
+            boolean comparable,
+            boolean outcomeChanged,
+            boolean destinationChanged,
+            boolean vmChanged,
+            boolean executionTargetChanged,
+            boolean offloadingDecisionFlipped,
+            boolean feasibilityRestored,
+            DecisionChangeType primaryChangeType,
+            String reason) {
+
+        this.taskId =
+                taskId;
+
+        this.comparable =
+                comparable;
+
+        this.outcomeChanged =
+                outcomeChanged;
+
+        this.destinationChanged =
+                destinationChanged;
+
+        this.vmChanged =
+                vmChanged;
+
+        this.executionTargetChanged =
+                executionTargetChanged;
+
+        this.offloadingDecisionFlipped =
+                offloadingDecisionFlipped;
+
+        this.feasibilityRestored =
+                feasibilityRestored;
+
+        this.primaryChangeType =
+                primaryChangeType;
+
+        this.reason =
+                reason == null
+                ? "NO_REASON"
+                : reason;
+    }
+
+    /**
+     * Creates an indeterminate comparison result.
+     */
+    public static DecisionComparisonResult notComparable(
+            long taskId,
+            String reason) {
+
+        return new DecisionComparisonResult(
+                taskId,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                null,
+                reason);
+    }
+
+    public long getTaskId() {
+
+        return taskId;
+    }
+
+    public boolean isComparable() {
+
+        return comparable;
+    }
+
+    public boolean isOutcomeChanged() {
+
+        return outcomeChanged;
+    }
+
+    public boolean isDestinationChanged() {
+
+        return destinationChanged;
+    }
+
+    public boolean isVmChanged() {
+
+        return vmChanged;
+    }
+
+    public boolean isExecutionTargetChanged() {
+
+        return executionTargetChanged;
+    }
+
+    /**
+     * Retained as a compatibility alias for older code.
+     */
+    public boolean isDecisionFlipped() {
+
+        return offloadingDecisionFlipped;
+    }
+
+    public boolean isOffloadingDecisionFlipped() {
+
+        return offloadingDecisionFlipped;
+    }
+
+    public boolean isFeasibilityRestored() {
+
+        return feasibilityRestored;
+    }
+
+    public DecisionChangeType getPrimaryChangeType() {
+
+        return primaryChangeType;
+    }
+
+    public String getReason() {
+
+        return reason;
+    }
+
+    /**
+     * Returns true when any supported scheduler-decision change occurred.
+     */
+    public boolean hasAnyDecisionChange() {
+
+        if(!comparable) {
+
+            return false;
+        }
+
+        return outcomeChanged
+                || destinationChanged
+                || executionTargetChanged
+                || feasibilityRestored;
+    }
+
+    /**
+     * Determines whether the observed decision satisfies the requested
+     * counterfactual objective.
+     */
+    public boolean satisfies(
+            DecisionChangeType requestedChangeType) {
+
+        if(!comparable
+                || requestedChangeType == null) {
+
+            return false;
+        }
+
+        switch(requestedChangeType) {
+
+            case EXECUTION_TARGET_CHANGE:
+
+                /*
+                 * A destination change also necessarily changes the
+                 * execution target.
+                 */
+                return executionTargetChanged;
+
+            case DESTINATION_CHANGE:
+
+                return destinationChanged;
+
+            case FEASIBILITY_RESTORATION:
+
+                return feasibilityRestored;
+
+            default:
+
+                return false;
+        }
+    }
+
+    @Override
+    public String toString() {
+
+        return "DecisionComparisonResult{"
+                + "taskId="
+                + taskId
+
+                + ", comparable="
+                + comparable
+
+                + ", outcomeChanged="
+                + outcomeChanged
+
+                + ", destinationChanged="
+                + destinationChanged
+
+                + ", vmChanged="
+                + vmChanged
+
+                + ", executionTargetChanged="
+                + executionTargetChanged
+
+                + ", offloadingDecisionFlipped="
+                + offloadingDecisionFlipped
+
+                + ", feasibilityRestored="
+                + feasibilityRestored
+
+                + ", primaryChangeType="
+                + primaryChangeType
+
+                + ", reason='"
+                + reason
+                + '\''
+                + '}';
+    }
+}
