@@ -83,4 +83,4 @@ By separating counterfactual generation from the internal structure of individua
 
 ## Paper
 
-**Scheduler-Agnostic Counterfactual Framework for Edge-Cloud Task Offloading Using Counterfactual Explanations**
+** A Scheduler-Agnostic Counterfactual Framework for Edge-Cloud Task Offloading Using Counterfactual Explanations**
